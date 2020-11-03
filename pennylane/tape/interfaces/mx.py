@@ -174,7 +174,10 @@ class MXInterface(AnnotatedQueue):
         trainable_params = set()
 
         for idx, p in enumerate(params):
-            if isinstance(p, mx.nd.NDArray) and p.grad is None:
+            # NOTE: Currently, we don't filter out trainable params because there is
+            # no way to determine if a variable is trainable in MXNet.
+            # See: https://github.com/apache/incubator-mxnet/discussions/19414
+            if isinstance(p, mx.nd.NDArray):
                 trainable_params.add(idx)
 
         self.trainable_params = trainable_params
