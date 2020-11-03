@@ -13,9 +13,9 @@
 # limitations under the License.
 """
 This module contains the mixin interface class for creating differentiable quantum tapes with
-PyTorch.
+MXNet.
 """
-from mxnet import autograd
+# pylint: disable=protected-access, attribute-defined-outside-init, arguments-differ, no-member
 import numpy as np
 import mxnet as mx
 
@@ -23,6 +23,10 @@ from pennylane.tape.queuing import AnnotatedQueue
 
 
 class _MXInterface(mx.autograd.Function):
+    def __init__(self, kwargs):
+        super().__init__()
+        self.kwargs = kwargs
+
     @staticmethod
     def convert_to_numpy(tensors):
         """Converts any MXNet NDArray in a sequence to NumPy arrays.
@@ -35,11 +39,10 @@ class _MXInterface(mx.autograd.Function):
         """
         return [i.asnumpy() if isinstance(i, mx.nd.NDArray) else i for i in tensors]
 
-    def forward(self, input_kwargs, *input_):
+    def forward(self, *input_):
         """Implements the forward pass QNode evaluation"""
         # detach all input tensors, convert to NumPy array
         self.args = self.convert_to_numpy(input_)
-        self.kwargs = input_kwargs
         self.save_for_backward(*input_)
 
         tape = self.kwargs["tape"]
@@ -78,13 +81,13 @@ class _MXInterface(mx.autograd.Function):
         jacobian = mx.nd.array(jacobian, dtype=dy.dtype)
 
         # Calculate the vector-Jacobian matrix product, and unstack the output.
-        grad_input = dy.reshape(1, -1) @ jacobian
+        grad_input = mx.nd.dot(dy.reshape(1, -1), jacobian)
         flattened_grad = grad_input.reshape(-1)
         grad_input_list = flattened_grad.split(flattened_grad.shape[0], axis=0)
         grad_input = []
 
         # match the type and device of the input tensors
-        (inputs,) = self.saved_tensors
+        inputs = self.saved_tensors
         for i, j in zip(grad_input_list, inputs):
             res = mx.nd.array(i, dtype=tape.dtype)
             context = j.context
@@ -92,21 +95,7 @@ class _MXInterface(mx.autograd.Function):
                 res = mx.nd.array(res, ctx=context, dtype=tape.dtype)
             grad_input.append(res)
 
-        return (None,) + tuple(grad_input)
-
-
-class sigmoid(mx.autograd.Function):
-    def forward(self, _, x):
-        print("hello", x)
-        y = 1 / (1 + mx.nd.exp(-x))
-        self.save_for_backward(y)
-        print("bye")
-        return y
-
-    def backward(self, dy):
-        print("asdsad")
-        (y,) = self.saved_tensors
-        return (None, dy * y * (1 - y))
+        return grad_input
 
 
 class MXInterface(AnnotatedQueue):
@@ -133,44 +122,47 @@ class MXInterface(AnnotatedQueue):
 
         dev = qml.device("default.qubit", wires=1)
         p = mx.nd.array([0.1, 0.2, 0.3])
+        p.attach_grad()
 
-        with MXInterface.apply(QuantumTape()) as qtape:
-            qml.Rot(p[0], p[1] ** 2 + p[0] * p[2], p[1] * mx.nd.sin(p[2]), wires=0)
-            expval(qml.PauliX(0))
+        with autograd.record():
+            with MXInterface.apply(QuantumTape()) as qtape:
+                qml.Rot(p[0], p[1] ** 2 + p[0] * p[2], p[1] * mx.nd.sin(p[2]), wires=0)
+                expval(qml.PauliX(0))
 
-        result = qtape.execute(dev)
+            result = qtape.execute(dev)
+            result.backward()
 
     >>> print(result)
-    [0.06982073]
+    [0.06982072]
     <NDArray 1 @cpu(0)>
-    >>> result.backward()
     >>> print(p.grad)
-    [0.29874274 0.39710271 0.09958091]
+    [0.2988428  0.39715624 0.09881392]
     <NDArray 3 @cpu(0)>
 
     The MXNet interface defaults to ``numpy.float32`` output. This can be modified by
     providing the ``dtype`` argument when applying the interface:
 
-    >>> p = mx.nd.array([0.1, 0.2, 0.3], dtype=numpy.float64)
-    >>> with MXInterface.apply(QuantumTape()) as qtape:
-    ...     qml.Rot(p[0], p[1] ** 2 + p[0] * p[2], p[1] *  mx.nd.sin(p[2]), wires=0)
-    ...     expval(qml.PauliX(0))
-    >>> result = qtape.execute(dev)
+    >>> p = mx.nd.array([0.1, 0.2, 0.3], dtype=np.float64)
+    >>> p.attach_grad()
+    >>> with autograd.record():
+    ...     with MXInterface.apply(QuantumTape(), dtype=np.float64) as qtape:
+    ...         qml.Rot(p[0], p[1] ** 2 + p[0] * p[2], p[1] * mx.nd.sin(p[2]), wires=0)
+    ...         expval(qml.PauliX(0))
+    ...     result = qtape.execute(dev)
+    ...     result.backward()
     >>> print(result)
     [0.06982072]
     <NDArray 1 @cpu(0)>
     >>> print(result.dtype)
-    numpy.float64
-    >>> result.backward()
+    <class 'numpy.float64'>
     >>> print(p.grad)
-    [0.29874274 0.39710271 0.09958091]
+    [0.29874274 0.39710271 0.09879152]
     <NDArray 3 @cpu(0)>
     >>> print(p.grad.dtype)
-    numpy.float64
+    <class 'numpy.float64'>
     """
 
-    dtype = np.float64
-    f = sigmoid()
+    dtype = np.float32
 
     @property
     def interface(self):  # pylint: disable=missing-function-docstring
@@ -190,12 +182,11 @@ class MXInterface(AnnotatedQueue):
 
     def _execute(self, params, **kwargs):
         kwargs["tape"] = self
-        x = params[-1]
-        res = self.f("a", x)
+        res = _MXInterface(kwargs)(*params)
         return res
 
     @classmethod
-    def apply(cls, tape, dtype=np.float64):
+    def apply(cls, tape, dtype=np.float32):
         """Apply the MXNet interface to an existing tape in-place.
 
         Args:
